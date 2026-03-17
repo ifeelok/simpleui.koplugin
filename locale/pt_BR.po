@@ -587,3 +587,39 @@ msgstr "páginas/dia (7 dias)"
 
 msgid "visible"
 msgstr "visível"
+
+msgid "Arrange Buttons"
+msgstr "Reorganizar Botões"
+
+msgid "Back"
+msgstr "Voltar"
+
+msgid "Button Size"
+msgstr "Tamanho dos Botões"
+
+msgid "Close"
+msgstr "Fechar"
+
+msgid "Custom Title Bar"
+msgstr "Barra de Título Personalizada"
+
+msgid "Custom Title Bar will be %s after restart.\n\nRestart now?"
+msgstr "A barra de título personalizada ficará %s após reiniciar.\n\nReiniciar agora?"
+
+msgid "Library Buttons"
+msgstr "Botões da Biblioteca"
+
+msgid "Menu"
+msgstr "Menu"
+
+msgid "More Options"
+msgstr "Mais Opções"
+
+msgid "Sub-pages Buttons"
+msgstr "Botões de Sub-páginas"
+
+msgid "Title"
+msgstr "Título"
+
+msgid "Title Bar"
+msgstr "Barra de Título"

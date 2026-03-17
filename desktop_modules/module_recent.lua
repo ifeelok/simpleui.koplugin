@@ -26,15 +26,15 @@ local function getSH()
     return _SH
 end
 
-local UI      = require("ui")
-local PAD     = UI.PAD
-local PAD2    = UI.PAD2
-local MOD_GAP = UI.MOD_GAP
-local LABEL_H = UI.LABEL_H
+local UI           = require("ui")
+local PAD          = UI.PAD
+local PAD2         = UI.PAD2
+local MOD_GAP      = UI.MOD_GAP
+local LABEL_H      = UI.LABEL_H
+local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 
 local RB_PCT_FONT_SIZE = Screen:scaleBySize(10)  -- "XX% Read" label font size
 
-local _CLR_TEXT_DARK = Blitbuffer.gray(0.20)
 
 local M = {}
 
@@ -64,17 +64,18 @@ function M.build(w, ctx)
         local cover = SH.getBookCover(fp, cw, ch) or SH.coverPlaceholder(bd.title, cw, ch)
 
         local cell = VerticalGroup:new{
-            align = "left",
+            align = "center",
             cover,
             SH.vspan(SH.RB_GAP1, ctx.vspan_pool),
             SH.progressBar(cw, bd.percent, SH.RB_BAR_H),
             SH.vspan(SH.RB_GAP2, ctx.vspan_pool),
             TextWidget:new{
-                text    = string.format(_("%d%% Read"), math.floor((bd.percent or 0) * 100)),
-                face    = Font:getFace("smallinfofont", RB_PCT_FONT_SIZE),
-                bold    = true,
-                fgcolor = _CLR_TEXT_DARK,
-                width   = cw,
+                text      = string.format(_("%d%% Read"), math.floor((bd.percent or 0) * 100)),
+                face      = Font:getFace("smallinfofont", RB_PCT_FONT_SIZE),
+                bold      = true,
+                fgcolor   = CLR_TEXT_SUB,
+                width     = cw,
+                alignment = "center",
             },
         }
 

@@ -42,6 +42,10 @@ M.LABEL_PAD_BOT = M.PAD2                    -- padding_bottom of sectionLabel (w
 M.LABEL_TEXT_H  = Screen:scaleBySize(16)    -- TextWidget height at SECTION_LABEL_SIZE
 M.LABEL_H       = M.LABEL_PAD_TOP + M.LABEL_PAD_BOT + M.LABEL_TEXT_H
 
+-- Shared secondary text colour used across all desktop modules.
+-- Edit this single value to retheme every module at once.
+M.CLR_TEXT_SUB  = Blitbuffer.gray(0.50)
+
 -- ---------------------------------------------------------------------------
 -- Shared menu-item resolver
 -- Converts KOReader-style menu item tables (with checked_func / enabled_func /

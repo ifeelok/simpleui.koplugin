@@ -13,13 +13,15 @@ local Geom            = require("ui/geometry")
 local GestureRange    = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local InputContainer  = require("ui/widget/container/inputcontainer")
+local TextBoxWidget   = require("ui/widget/textboxwidget")
 local TextWidget      = require("ui/widget/textwidget")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
 
-local UI      = require("ui")
-local PAD     = UI.PAD
-local LABEL_H = UI.LABEL_H
+local UI           = require("ui")
+local PAD          = UI.PAD
+local LABEL_H      = UI.LABEL_H
+local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 
 -- Shared helpers — lazy-loaded.
 local _SH = nil
@@ -41,7 +43,6 @@ local BAR_GAP    = Screen:scaleBySize(6)   -- below progress bar
 local PCT_GAP    = Screen:scaleBySize(3)   -- below percentage, before time-left
 
 local _CLR_DARK = Blitbuffer.gray(0.20)
-local _CLR_MID  = Blitbuffer.gray(0.45)
 
 local M = {}
 
@@ -66,11 +67,12 @@ function M.build(w, ctx)
 
     local meta = VerticalGroup:new{ align = "left" }
 
-    meta[#meta+1] = TextWidget:new{
-        text  = bd.title or "?",
-        face  = Font:getFace("smallinfofont", Screen:scaleBySize(12)),
-        bold  = true,
-        width = tw,
+    meta[#meta+1] = TextBoxWidget:new{
+        text       = bd.title or "?",
+        face       = Font:getFace("smallinfofont", Screen:scaleBySize(12)),
+        bold       = true,
+        width      = tw,
+        max_lines  = 2,
     }
     meta[#meta+1] = VerticalSpan:new{ width = TITLE_GAP }
 
@@ -78,7 +80,7 @@ function M.build(w, ctx)
         meta[#meta+1] = TextWidget:new{
             text    = bd.authors,
             face    = Font:getFace("smallinfofont", Screen:scaleBySize(11)),
-            fgcolor = _CLR_MID,
+            fgcolor = CLR_TEXT_SUB,
             width   = tw,
         }
         meta[#meta+1] = VerticalSpan:new{ width = AUTHOR_GAP }
@@ -101,7 +103,7 @@ function M.build(w, ctx)
         meta[#meta+1] = TextWidget:new{
             text    = string.format(_("%s TO GO"), tl:upper()),
             face    = Font:getFace("smallinfofont", Screen:scaleBySize(9)),
-            fgcolor = _CLR_MID,
+            fgcolor = CLR_TEXT_SUB,
             width   = tw,
         }
     end

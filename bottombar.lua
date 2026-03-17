@@ -285,6 +285,21 @@ function M.registerTouchZones(plugin, fm_self)
         zones[#zones + 1] = {
             id          = "navbar_pos_" .. i,
             ges         = "tap",
+            -- Explicitly override every tappable ges_event used by homescreen
+            -- modules so the DepGraph always places navbar zones first.
+            -- Without this, the ordering is non-deterministic and taps on the
+            -- navbar can fire module callbacks (open book, open collection, etc.)
+            -- instead of the intended tab action. See: reported issue "bottom
+            -- menu opens books rather than doing menu-y things".
+            overrides   = {
+                "tap_left_bottom_corner",   -- Gestures plugin: frontlight toggle
+                "tap_right_bottom_corner",  -- Gestures plugin: right corner action
+                "TapBook",    -- module_currently, module_recent
+                "TapColl",    -- module_collections
+                "TapQA",      -- module_quick_actions
+                "TapGoal",    -- module_reading_goals
+                "TapSelect",  -- Menu/FileChooser items (safety net for all pages)
+            },
             screen_zone = {
                 ratio_x = x_start    / screen_w,
                 ratio_y = bar_y      / screen_h,
@@ -313,6 +328,7 @@ function M.registerTouchZones(plugin, fm_self)
     zones[#zones + 1] = {
         id          = "navbar_hold_start",
         ges         = "hold",
+        overrides   = { "tap_left_bottom_corner", "tap_right_bottom_corner", "TapBook", "TapColl", "TapQA", "TapGoal", "TapSelect" },
         screen_zone = bar_screen_zone,
         handler     = function(_ges) return true end,
     }
@@ -353,7 +369,11 @@ function M.onTabTap(plugin, action_id, fm_self)
     local already_active = (plugin.active_action == action_id)
 
     plugin.active_action = action_id
-    if fm_self._navbar_container then
+    -- "homescreen" skips the eager replaceBar here: UIManager.show will call
+    -- setActiveAndRefreshFM when the HS widget is shown, which rebuilds the FM
+    -- bar at that point. Doing it twice produces a redundant buildBarWidget call
+    -- and extra setDirty flushes with no visible benefit.
+    if fm_self._navbar_container and action_id ~= "homescreen" then
         M.replaceBar(fm_self, M.buildBarWidget(action_id, tabs), tabs)
         UIManager:setDirty(fm_self._navbar_container, "ui")
         UIManager:setDirty(fm_self, "ui")
@@ -497,27 +517,47 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
         return
     end
 
+    -- Replicates FileChooser:goHome() behaviour:
+    --   1. Falls back to Device.home_dir if home_dir is unset or the folder is gone.
+    --   2. If the FM is already at the home path: page-reset + content refresh.
+    --   3. Otherwise: navigate to the home path.
+    -- The suppress flag prevents onPathChanged from firing a redundant bar rebuild
+    -- (the caller already handles the bar before or after invoking this helper).
+    -- Returns true when a home directory was resolved and acted upon, false otherwise.
+    local function _goHome(target_fm)
+        local fc = target_fm and target_fm.file_chooser
+        if not fc then return false end
+        local home = G_reader_settings:readSetting("home_dir")
+        local lfs  = require("libs/libkoreader-lfs")
+        if not home or lfs.attributes(home, "mode") ~= "directory" then
+            home = Device.home_dir
+        end
+        if not home then return false end
+        if fc.path == home then
+            -- Already at home: reset to page 1 and refresh content.
+            pcall(function() fc:onGotoPage(1) end)
+            pcall(function() fc:refreshPath() end)
+        else
+            target_fm._navbar_suppress_path_change = true
+            fc:changeToPath(home)
+            target_fm._navbar_suppress_path_change = nil
+        end
+        return true
+    end
+
     if hs_open then
         -- Navigate the FM while it's still covered by the HS.
         if action_id == "home" then
-            local home = G_reader_settings:readSetting("home_dir")
-            if home then
-                if fm.file_chooser then
-                    fm.file_chooser:changeToPath(home)
-                    UIManager:setDirty(fm, "partial")
-                else
-                    -- file_chooser not yet created (FM is still initializing
-                    -- after being rebuilt post-reader). The HS close below will
-                    -- trigger a repaint that wakes the UIManager, so scheduleIn(0)
-                    -- will run in the very next event cycle.
-                    UIManager:scheduleIn(0, function()
-                        local live = plugin.ui
-                        if live and live.file_chooser then
-                            live.file_chooser:changeToPath(home)
-                            UIManager:setDirty(live, "partial")
-                        end
-                    end)
-                end
+            if fm.file_chooser then
+                _goHome(fm)
+            else
+                -- file_chooser not yet created (FM is still initializing
+                -- after being rebuilt post-reader). The HS close below will
+                -- trigger a repaint that wakes the UIManager, so scheduleIn(0)
+                -- will run in the very next event cycle.
+                UIManager:scheduleIn(0, function()
+                    _goHome(plugin.ui)
+                end)
             end
         end
         -- Close the HS before navigating to a new screen.
@@ -539,10 +579,18 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
     -- Close any open sub-window before navigating (non-HS case).
     if fm_self ~= fm then
         fm_self._navbar_closing_intentionally = true
+        -- Suppress the widget's close_callback for the duration of the
+        -- programmatic close. KOReader's booklist/coll_list menus carry a
+        -- close_callback that calls UIManager:close(self) again — executing it
+        -- here would cause a second close() on the same widget, producing
+        -- duplicate log entries and a redundant restore pass.
+        local saved_cb = fm_self.close_callback
+        fm_self.close_callback = nil
         pcall(function()
             if fm_self.onCloseAllMenus then fm_self:onCloseAllMenus()
             elseif fm_self.onClose     then fm_self:onClose() end
         end)
+        fm_self.close_callback = saved_cb
         fm_self._navbar_closing_intentionally = nil
     end
 
@@ -553,11 +601,12 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
 
     if action_id == "home" then
         local live_fm = plugin.ui or fm
-        local home = G_reader_settings:readSetting("home_dir")
-        if home and live_fm.file_chooser then
-            live_fm.file_chooser:changeToPath(home)
-            if force then UIManager:setDirty(live_fm, "partial") end
-        elseif live_fm.file_chooser then
+        if not _goHome(live_fm) then
+            -- No valid home directory found — repaint whatever is showing.
+            if live_fm.file_chooser then
+                UIManager:setDirty(live_fm, "partial")
+            end
+        elseif force then
             UIManager:setDirty(live_fm, "partial")
         end
 
@@ -572,14 +621,16 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
     elseif action_id == "homescreen" then
         local ok_hs, HS = pcall(require, "homescreen")
         if ok_hs and HS and type(HS.show) == "function" then
-            local tabs = Config.loadTabConfig()
             -- QA taps from the homescreen must NOT go through _onTabTap:
             -- _onTabTap calls replaceBar(fm) which schedules a full FM repaint,
             -- and that repaint fires after the homescreen closes and interferes
             -- with dispatcher_action widgets that try to open on top of the FM.
             -- Call navigate directly with fm as the target — no bar replacement.
+            -- plugin.ui and loadTabConfig() are resolved at tap time, not at open
+            -- time, so FM reinits or tab config changes while the HS is open are
+            -- always picked up correctly.
             local on_qa_tap = function(aid)
-                plugin:_navigate(aid, fm, tabs, false)
+                plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false)
             end
             local on_goal_tap = plugin._goalTapCallback or nil
             HS.show(on_qa_tap, on_goal_tap)
@@ -825,10 +876,12 @@ function M.restoreTabInFM(plugin, tabs, prev_action)
         end
     end)
     if should_skip then return end
-    local t = tabs or Config.loadTabConfig()
+    -- Always load tabs fresh: the `tabs` argument was captured at widget-open time
+    -- and may be stale if the user changed tab config while the widget was open.
+    local t = Config.loadTabConfig()
     local Patches = require("patches")
     local restored = (fm.file_chooser and Patches._resolveTabForPath(fm.file_chooser.path, t))
-                  or (t[1])
+                  or prev_action or (t[1])
     plugin.active_action = restored
     M.replaceBar(fm, M.buildBarWidget(restored, t), t)
     UIManager:setDirty(fm, "ui")
@@ -839,21 +892,37 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.showPowerDialog(plugin)
+    if plugin._power_dialog then return end  -- guard: ignore double-tap
     local ButtonDialog = require("ui/widget/buttondialog")
+    local dialog_w = math.floor(Screen:getWidth() * 0.42)
+    -- tap_close_callback fires when the user taps outside the dialog or presses
+    -- the physical Back key (via ButtonDialog:onClose). Without it, plugin._power_dialog
+    -- would never be cleared and the guard above would block all future opens.
+    local function _clear() plugin._power_dialog = nil end
     plugin._power_dialog = ButtonDialog:new{
+        width = dialog_w,
+        tap_close_callback = _clear,
         buttons = {
             {{ text = _("Restart"), callback = function()
-                UIManager:close(plugin._power_dialog)
+                local d = plugin._power_dialog
+                plugin._power_dialog = nil
+                UIManager:close(d)
                 G_reader_settings:flush()
                 local ok_exit, ExitCode = pcall(require, "exitcode")
+                if not ok_exit then logger.warn("simpleui: exitcode module unavailable, using 85") end
                 UIManager:quit((ok_exit and ExitCode and ExitCode.restart) or 85)
             end }},
             {{ text = _("Quit"), callback = function()
-                UIManager:close(plugin._power_dialog)
-                G_reader_settings:flush(); UIManager:quit(0)
+                local d = plugin._power_dialog
+                plugin._power_dialog = nil
+                UIManager:close(d)
+                G_reader_settings:flush()
+                UIManager:quit(0)
             end }},
             {{ text = _("Cancel"), callback = function()
-                UIManager:close(plugin._power_dialog)
+                local d = plugin._power_dialog
+                plugin._power_dialog = nil
+                UIManager:close(d)
             end }},
         },
     }

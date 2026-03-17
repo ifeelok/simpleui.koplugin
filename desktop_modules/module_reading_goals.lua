@@ -10,7 +10,8 @@ local Font            = require("ui/font")
 local FrameContainer  = require("ui/widget/container/framecontainer")
 local Geom            = require("ui/geometry")
 local GestureRange    = require("ui/gesturerange")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
+local HorizontalGroup  = require("ui/widget/horizontalgroup")
+local RightContainer   = require("ui/widget/container/rightcontainer")
 local HorizontalSpan  = require("ui/widget/horizontalspan")
 local InputContainer  = require("ui/widget/container/inputcontainer")
 local LineWidget      = require("ui/widget/linewidget")
@@ -21,36 +22,41 @@ local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
 local Screen          = Device.screen
 local _               = require("gettext")
+local logger          = require("logger")
 local Config          = require("config")
 
-local UI      = require("ui")
-local PAD     = UI.PAD
-local PAD2    = UI.PAD2
-local LABEL_H = UI.LABEL_H
+local UI           = require("ui")
+local PAD          = UI.PAD
+local PAD2         = UI.PAD2
+local LABEL_H      = UI.LABEL_H
+local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 
 local _CLR_BAR_BG   = Blitbuffer.gray(0.15)
 local _CLR_BAR_FG   = Blitbuffer.gray(0.75)
 local _CLR_TEXT_LBL = Blitbuffer.COLOR_BLACK
 local _CLR_TEXT_PCT = Blitbuffer.COLOR_BLACK
-local _CLR_TEXT_SUB = Blitbuffer.gray(0.50)
 
 -- All pixel constants computed once at load time.
 local ROW_FS      = Screen:scaleBySize(11)    -- label / pct font size
 local SUB_FS      = Screen:scaleBySize(10)    -- detail text font size
-local ROW_H       = Screen:scaleBySize(20)    -- height of one compact row
-local ROW_GAP     = Screen:scaleBySize(8)     -- gap between annual and daily rows
+local ROW_H       = Screen:scaleBySize(20)    -- height of the top bar row (label+bar+pct)
+local SUB_H       = Screen:scaleBySize(16)    -- height of the detail text row below
+local SUB_GAP     = Screen:scaleBySize(2)     -- gap between bar row and detail row
+local ROW_GAP     = Screen:scaleBySize(10)    -- gap between annual and daily goals
 local BAR_H       = Screen:scaleBySize(7)     -- progress bar thickness
 local LBL_W       = Screen:scaleBySize(44)    -- fixed width reserved for the label column
 local COL_GAP     = Screen:scaleBySize(8)     -- base gap unit
+local GOAL_ROW_H  = ROW_H + SUB_GAP + SUB_H  -- total height of one goal block
 
 -- Total module height: LABEL_H already added by _buildContent above each module.
 -- This is the height of the rows themselves.
 local function _rowsHeight(n)
-    return n * ROW_H + (n == 2 and ROW_GAP or 0)
+    return n * GOAL_ROW_H + (n == 2 and ROW_GAP or 0)
 end
 
--- Year string cached for the session.
-local _YEAR_STR = os.date("%Y")
+-- Year string — refreshed each call so it's always correct even across a year
+-- boundary in a long-running session. Cheap: os.date is a single C call.
+local function _getYearStr() return os.date("%Y") end
 
 -- Settings keys.
 local SHOW_ANNUAL = "navbar_reading_goals_show_annual"
@@ -93,7 +99,7 @@ local function getGoalStats(shared_conn)
     if not conn then return books_read, year_secs, today_secs end
     local own_conn = not shared_conn
 
-    pcall(function()
+    local ok, err = pcall(function()
         local t           = os.date("*t")
         local year_start  = os.time{ year = t.year, month = 1, day = 1, hour = 0, min = 0, sec = 0 }
         local today_start = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
@@ -110,13 +116,20 @@ local function getGoalStats(shared_conn)
                 WHERE start_time >= %d GROUP BY id_book, page);]], today_start))
         today_secs = tonumber(rt) or 0
 
+        -- Live ratio from the page_stat VIEW (rescales to current book.pages),
+        -- avoids the stale book.total_read_pages snapshot that can diverge when
+        -- a file is updated/re-indexed after the last reading session.
         local tb = conn:rowexec([[
-            SELECT count(*) FROM book
-            WHERE pages > 0
-              AND total_read_pages > 0
-              AND CAST(total_read_pages AS REAL) / pages >= 0.99]])
+            SELECT count(*) FROM (
+                SELECT b.id FROM book b
+                JOIN page_stat ps ON ps.id_book = b.id
+                WHERE b.pages > 0
+                GROUP BY b.id
+                HAVING count(DISTINCT ps.page) * 1.0 / b.pages >= 0.90
+            )]])
         books_read = tonumber(tb) or 0
     end)
+    if not ok then logger.warn("simpleui: reading_goals: getGoalStats failed: " .. tostring(err)) end
 
     if own_conn then pcall(function() conn:close() end) end
 
@@ -157,33 +170,17 @@ end
 --    7. Detail  — fills remaining space, left-aligned
 -- ---------------------------------------------------------------------------
 local function buildGoalRow(inner_w, label_str, pct, pct_str, detail_str, on_tap)
-    -- Layout: LBL_W + LBL_BAR_GAP + [bar flex] + BAR_PCT_GAP + PCT_W + PCT_DETAIL_GAP + DETAIL_W
-    --
-    -- The right block (pct + gap + detail) is sized as a fraction of inner_w
-    -- so spacing scales with screen size. The bar fills whatever remains.
-    local LBL_BAR_GAP = COL_GAP * 3
+    -- Top row: Label  [══════════░░░░]  XX%  (% right-aligned)
+    -- Bottom row: detail text (smaller, secondary colour)
 
-    -- Right block: ~28% of inner_w, split as PCT(30%) + gap(15%) + detail(55%).
-    local right_w        = math.floor(inner_w * 0.28)
-    local PCT_W          = math.floor(right_w * 0.30)
-    local PCT_DETAIL_GAP = math.floor(right_w * 0.15)
-    local DETAIL_W       = right_w - PCT_W - PCT_DETAIL_GAP
-
+    local PCT_W       = Screen:scaleBySize(32)
     local BAR_PCT_GAP = COL_GAP
     local bar_w       = math.max(Screen:scaleBySize(40),
-                            inner_w - LBL_W - LBL_BAR_GAP - BAR_PCT_GAP - right_w)
+                            inner_w - LBL_W - COL_GAP - BAR_PCT_GAP - PCT_W)
 
-    local function vcenter_left(child, col_w)
+    local function vcenter(child, col_w)
         local LeftContainer = require("ui/widget/container/leftcontainer")
         return LeftContainer:new{
-            dimen = Geom:new{ w = col_w, h = ROW_H },
-            child,
-        }
-    end
-
-    local function vcenter_right(child, col_w)
-        local RightContainer = require("ui/widget/container/rightcontainer")
-        return RightContainer:new{
             dimen = Geom:new{ w = col_w, h = ROW_H },
             child,
         }
@@ -200,42 +197,50 @@ local function buildGoalRow(inner_w, label_str, pct, pct_str, detail_str, on_tap
     local bar_widget = buildProgressBar(bar_w, pct)
 
     local pct_widget = TextWidget:new{
-        text    = pct_str,
-        face    = Font:getFace("smallinfofont", ROW_FS),
-        bold    = true,
-        fgcolor = _CLR_TEXT_PCT,
-        width   = PCT_W,
-    }
-
-    local detail_widget = TextWidget:new{
-        text      = detail_str,
-        face      = Font:getFace("cfont", SUB_FS),
-        fgcolor   = _CLR_TEXT_SUB,
-        width     = DETAIL_W,
+        text      = pct_str,
+        face      = Font:getFace("smallinfofont", ROW_FS),
+        bold      = false,
+        fgcolor   = _CLR_TEXT_PCT,
+        width     = PCT_W,
         alignment = "right",
     }
 
-    local row = HorizontalGroup:new{
+    local top_row = HorizontalGroup:new{
         align = "center",
-        vcenter_left(lbl_widget,      LBL_W),
-        HorizontalSpan:new{ width = LBL_BAR_GAP },
-        vcenter_left(bar_widget,      bar_w),
+        vcenter(lbl_widget, LBL_W),
+        HorizontalSpan:new{ width = COL_GAP },
+        vcenter(bar_widget, bar_w),
         HorizontalSpan:new{ width = BAR_PCT_GAP },
-        vcenter_left(pct_widget,      PCT_W),
-        HorizontalSpan:new{ width = PCT_DETAIL_GAP },
-        vcenter_right(detail_widget,  DETAIL_W),
+        RightContainer:new{
+            dimen = Geom:new{ w = PCT_W, h = ROW_H },
+            pct_widget,
+        },
+    }
+
+    local detail_widget = TextWidget:new{
+        text    = detail_str,
+        face    = Font:getFace("cfont", SUB_FS),
+        fgcolor = CLR_TEXT_SUB,
+        width   = inner_w,
+    }
+
+    local block = VerticalGroup:new{
+        align = "left",
+        top_row,
+        VerticalSpan:new{ width = SUB_GAP },
+        detail_widget,
     }
 
     local frame = FrameContainer:new{
         bordersize = 0, padding = 0,
-        dimen      = Geom:new{ w = inner_w, h = ROW_H },
-        row,
+        dimen      = Geom:new{ w = inner_w, h = GOAL_ROW_H },
+        block,
     }
 
     if not on_tap then return frame end
 
     local tappable = InputContainer:new{
-        dimen   = Geom:new{ w = inner_w, h = ROW_H },
+        dimen   = Geom:new{ w = inner_w, h = GOAL_ROW_H },
         [1]     = frame,
         _on_tap = on_tap,
     }
@@ -254,6 +259,7 @@ local function buildGoalRow(inner_w, label_str, pct, pct_str, detail_str, on_tap
     return tappable
 end
 
+
 -- ---------------------------------------------------------------------------
 -- Homescreen refresh helper
 -- ---------------------------------------------------------------------------
@@ -269,7 +275,7 @@ local function showAnnualGoalDialog(on_confirm)
     local SpinWidget = require("ui/widget/spinwidget")
     UIManager:show(SpinWidget:new{
         title_text  = _("Annual Reading Goal"),
-        info_text   = string.format(_("Books to read in %s:"), _YEAR_STR),
+        info_text   = string.format(_("Books to read in %s:"), _getYearStr()),
         value       = (function() local g = getAnnualGoal(); return g > 0 and g or 12 end)(),
         value_min   = 0, value_max = 365, value_step = 1,
         ok_text     = _("Save"), cancel_text = _("Cancel"),
@@ -285,7 +291,7 @@ end
 local function showAnnualPhysicalDialog(on_confirm)
     local SpinWidget = require("ui/widget/spinwidget")
     UIManager:show(SpinWidget:new{
-        title_text  = string.format(_("Physical Books — %s"), _YEAR_STR),
+        title_text  = string.format(_("Physical Books — %s"), _getYearStr()),
         info_text   = _("Physical books read this year:"),
         value       = getAnnualPhysical(), value_min = 0, value_max = 365, value_step = 1,
         ok_text     = _("Save"), cancel_text = _("Cancel"),
@@ -357,7 +363,7 @@ function M.build(w, ctx)
         else
             detail = string.format(_("%d books"), read)
         end
-        rows[#rows+1] = buildGoalRow(inner_w, _YEAR_STR, pct, pct_str, detail, on_annual_tap)
+        rows[#rows+1] = buildGoalRow(inner_w, _getYearStr(), pct, pct_str, detail, on_annual_tap)
     end
 
     if show_ann and show_day then
@@ -404,14 +410,14 @@ function M.getMenuItems(ctx_menu)
         { text_func = function()
               local g = getAnnualGoal()
               return g > 0
-                  and string.format(_lc("  Set Goal  (%d books in %s)"), g, _YEAR_STR)
-                  or  string.format(_lc("  Set Goal  (%s)"), _YEAR_STR)
+                  and string.format(_lc("  Set Goal  (%d books in %s)"), g, _getYearStr())
+                  or  string.format(_lc("  Set Goal  (%s)"), _getYearStr())
           end,
           keep_menu_open = true,
           callback = function() showAnnualGoalDialog(refresh) end },
         { text_func = function()
               local p = getAnnualPhysical()
-              return string.format(_lc("  Physical Books  (%d in %s)"), p, _YEAR_STR)
+              return string.format(_lc("  Physical Books  (%d in %s)"), p, _getYearStr())
           end,
           keep_menu_open = true,
           callback = function() showAnnualPhysicalDialog(refresh) end },

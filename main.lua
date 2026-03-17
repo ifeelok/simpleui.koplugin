@@ -218,8 +218,18 @@ function SimpleUIPlugin:addToMainMenu(menu_items)
             menu_items.simpleui = { sorting_hint = "tools", text = "Simple UI", sub_item_table = {} }
             return
         end
+        -- The installer replaces addToMainMenu on SimpleUIPlugin. If it did not
+        -- (e.g. menu.lua ran without error but returned early due to an internal
+        -- failure on low-memory devices), log the fault and show a stub entry
+        -- rather than silently producing a menu that opens nothing.
         local real_fn = rawget(SimpleUIPlugin, "addToMainMenu")
-        if real_fn then real_fn(self, menu_items) end
+        if type(real_fn) == "function" and real_fn ~= SimpleUIPlugin.addToMainMenu then
+            real_fn(self, menu_items)
+        else
+            menu_module_loaded = false
+            logger.err("simpleui: menu installer did not replace addToMainMenu — opening menu aborted")
+            menu_items.simpleui = { sorting_hint = "tools", text = "Simple UI", sub_item_table = {} }
+        end
         return
     end
 end

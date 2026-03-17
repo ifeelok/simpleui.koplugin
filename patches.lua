@@ -9,9 +9,7 @@ local _          = require("gettext")
 local Config    = require("config")
 local UI        = require("ui")
 local Bottombar = require("bottombar")
-
--- Zero-size Geom used to hide the right title bar button on injected widgets.
-local _ZERO_DIMEN = require("ui/geometry"):new{ w = 0, h = 0 }
+local Titlebar  = require("titlebar")
 
 local M = {}
 
@@ -73,18 +71,7 @@ function M.patchFileManagerClass(plugin)
 
     FileManager.setupLayout = function(fm_self)
         local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
-        local topbar_h  = 0
-        if topbar_on then
-            local ok_tb, tb_mod = pcall(require, "topbar")
-            if ok_tb and tb_mod and tb_mod.TOTAL_TOP_H then
-                topbar_h = tb_mod.TOTAL_TOP_H()
-            else
-                -- topbar unavailable; disable for this session to avoid a crash loop
-                topbar_on = false
-                logger.warn("simpleui: topbar unavailable in setupLayout, disabling topbar")
-            end
-        end
-        fm_self._navbar_height = Bottombar.TOTAL_H() + topbar_h
+        fm_self._navbar_height = Bottombar.TOTAL_H() + (topbar_on and require("topbar").TOTAL_TOP_H() or 0)
 
         -- Patch FileChooser.init once on the class so repeated FM rebuilds
         -- don't re-wrap. Reduces height to the content area.
@@ -104,46 +91,9 @@ function M.patchFileManagerClass(plugin)
 
         orig_setupLayout(fm_self)
 
-        -- Swap the right title bar button icon to plus_alt and intercept
-        -- setRightIcon so the custom icon is preserved when KOReader resets it.
-        local PLUS_ALT_ICON = Config.ICON.plus_alt
-        local tb = fm_self.title_bar
-        if tb and tb.right_button then
-            local function setPlusAltIcon(btn)
-                if btn.image then
-                    btn.image.file = PLUS_ALT_ICON
-                    btn.image:free(); btn.image:init()
-                end
-            end
-            setPlusAltIcon(tb.right_button)
-            local orig_setRightIcon = tb.setRightIcon
-            tb.setRightIcon = function(tb_self, icon, ...)
-                local result = orig_setRightIcon(tb_self, icon, ...)
-                if icon == "plus" then
-                    setPlusAltIcon(tb_self.right_button)
-                    UIManager:setDirty(tb_self.show_parent, "ui", tb_self.dimen)
-                end
-                return result
-            end
-        end
-
-        -- Reposition the right button as the menu trigger and hide the left button.
-        if tb and tb.left_button and tb.right_button then
-            local rb = tb.right_button
-            if rb.image then
-                rb.image.file = Config.ICON.ko_menu
-                rb.image:free(); rb.image:init()
-            end
-            rb.overlap_align  = nil
-            rb.overlap_offset = { Screen:scaleBySize(18), 0 }
-            rb.padding_left   = 0
-            rb:update()
-            tb.left_button.overlap_align  = nil
-            tb.left_button.overlap_offset = { Screen:getWidth() + 100, 0 }
-            tb.left_button.callback       = function() end
-            tb.left_button.hold_callback  = function() end
-        end
-        if tb and tb.setTitle then tb:setTitle(_("Library")) end
+        -- Delegate all FM title-bar customisation to titlebar.lua.
+        -- apply() is a no-op when the "Custom Title Bar" setting is off.
+        Titlebar.apply(fm_self)
 
         -- Keep the original inner widget reference so re-wrapping on subsequent
         -- setupLayout calls wraps the same widget instead of the wrapper.
@@ -157,19 +107,8 @@ function M.patchFileManagerClass(plugin)
 
         local tabs = Config.loadTabConfig()
 
-        local ok_wrap, wrap_err
-        local navbar_container, wrapped, bar, topbar, bar_idx, topbar_on2, topbar_idx
-        ok_wrap, wrap_err = pcall(function()
-            navbar_container, wrapped, bar, topbar, bar_idx, topbar_on2, topbar_idx =
-                UI.wrapWithNavbar(inner_widget, plugin.active_action, tabs)
-        end)
-        if not ok_wrap then
-            logger.err("simpleui: wrapWithNavbar failed in setupLayout:", tostring(wrap_err))
-            -- Fall back to the unwrapped widget so the FM is at least functional.
-            fm_self[1] = inner_widget
-            plugin:_registerTouchZones(fm_self)
-            return
-        end
+        local navbar_container, wrapped, bar, topbar, bar_idx, topbar_on2, topbar_idx =
+            UI.wrapWithNavbar(inner_widget, plugin.active_action, tabs)
         UI.applyNavbarState(fm_self, navbar_container, bar, topbar, bar_idx, topbar_on2, topbar_idx, tabs)
         fm_self[1] = wrapped
 
@@ -202,8 +141,9 @@ function M.patchFileManagerClass(plugin)
                     end
                     if HS then
                         if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                        local t = Config.loadTabConfig()
-                        HS.show(function(aid) plugin:_navigate(aid, this, t, false) end, plugin._goalTapCallback)
+                        -- plugin.ui and loadTabConfig() resolved at tap time so FM
+                        -- reinits or tab config changes while the HS is open are picked up.
+                        HS.show(function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end, plugin._goalTapCallback)
                     end
                 end)
                 return
@@ -215,7 +155,10 @@ function M.patchFileManagerClass(plugin)
                 plugin.active_action = "home"
                 local home = G_reader_settings:readSetting("home_dir")
                 if home and this.file_chooser then
+                    -- Suppress onPathChanged: replaceBar below covers the bar update.
+                    this._navbar_suppress_path_change = true
                     this.file_chooser:changeToPath(home)
+                    this._navbar_suppress_path_change = nil
                 end
                 Bottombar.replaceBar(this, Bottombar.buildBarWidget("home", t), t)
                 UIManager:setDirty(this, "ui")
@@ -225,7 +168,11 @@ function M.patchFileManagerClass(plugin)
         plugin:_registerTouchZones(fm_self)
 
         -- onPathChanged: update the active tab when the user navigates directories.
+        -- Skipped when _navbar_suppress_path_change is set — that flag is raised by
+        -- programmatic changeToPath calls (tab tap, onShow boot) that already handle
+        -- the bar rebuild themselves, making this handler redundant in those cases.
         fm_self.onPathChanged = function(this, new_path)
+            if this._navbar_suppress_path_change then return end
             local t          = Config.loadTabConfig()
             local new_active = M._resolveTabForPath(new_path, t) or "home"
             plugin.active_action = new_active
@@ -575,11 +522,28 @@ function M.patchUIManagerShow(plugin)
             if HS and not HS._instance then
                 if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
                 local tabs = Config.loadTabConfig()
+                -- Capture the FM's active tab *before* setting it to "homescreen".
+                -- The HS widget is injected by UIManager.show below, which reads
+                -- plugin.active_action as action_before and stores it as
+                -- _navbar_prev_action. If we called setActiveAndRefreshFM first,
+                -- action_before would already be "homescreen", so closing the HS
+                -- via back-button would restore "homescreen" instead of the real
+                -- previous tab (typically "home"). By setting _navbar_prev_action
+                -- explicitly after show, we ensure the correct value is used.
+                local prev_action = plugin.active_action
                 Bottombar.setActiveAndRefreshFM(plugin, "homescreen", tabs)
+                -- plugin.ui and loadTabConfig() resolved at tap time so FM
+                -- reinits or tab config changes while the HS is open are picked up.
                 HS.show(
-                    function(aid) plugin:_navigate(aid, widget, tabs, false) end,
+                    function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end,
                     plugin._goalTapCallback
                 )
+                -- Correct _navbar_prev_action: UIManager.show captured "homescreen"
+                -- as action_before (because setActiveAndRefreshFM ran first), but the
+                -- real state to restore on back-button close is the tab that was active
+                -- before the HS opened.
+                local hs_inst = HS._instance
+                if hs_inst then hs_inst._navbar_prev_action = prev_action end
             end
             return
         end
@@ -620,20 +584,9 @@ function M.patchUIManagerShow(plugin)
             widget._navbar_height_reduced = true
         end
 
-        -- Reposition the left title bar button; hide the right one.
-        local tb = widget.title_bar
-        if tb then
-            if tb.left_button then
-                tb.left_button.overlap_align  = nil
-                tb.left_button.overlap_offset = { Screen:scaleBySize(13), 0 }
-            end
-            local rb = tb.right_button
-            if rb then
-                rb.dimen         = _ZERO_DIMEN
-                rb.callback      = function() end
-                rb.hold_callback = function() end
-            end
-        end
+        -- Delegate injected-widget title-bar customisation to titlebar.lua.
+        -- applyToInjected() is a no-op when "Custom Title Bar" is off.
+        Titlebar.applyToInjected(widget)
 
         local tabs          = Config.loadTabConfig()
         -- Build a set for O(1) membership tests — avoids repeated linear scans
@@ -645,13 +598,11 @@ function M.patchUIManagerShow(plugin)
         -- Activate the tab that corresponds to the widget being shown.
         if widget.name == "collections" and Config.isFavoritesWidget(widget) and tabs_set["favorites"] then
             effective_action = Bottombar.setActiveAndRefreshFM(plugin, "favorites", tabs)
-            local orig_onReturn = widget.onReturn
-            if orig_onReturn then
-                widget.onReturn = function(w_self, ...)
-                    plugin:_restoreTabInFM(w_self._navbar_tabs, action_before)
-                    return orig_onReturn(w_self, ...)
-                end
-            end
+            -- NOTE: no onReturn wrapper here. The native onReturn calls
+            -- UIManager:close(self), which our patchUIManagerClose already
+            -- intercepts and handles (tab restore + setDirty). Adding a wrapper
+            -- that also called _restoreTabInFM caused a double restore and a
+            -- double close() emission on every Back button press.
         elseif widget.name == "history" and tabs_set["history"] then
             effective_action = Bottombar.setActiveAndRefreshFM(plugin, "history", tabs)
         elseif widget.name == "homescreen" and tabs_set["homescreen"] then
@@ -794,12 +745,21 @@ function M.patchUIManagerClose(plugin)
         end
         for _, w in ipairs(to_close) do UIManager:close(w) end
         local tabs = Config.loadTabConfig()
+        -- Capture the FM's active tab before setting it to "homescreen", so that
+        -- closing the HS via back-button restores the correct previous tab rather
+        -- than "homescreen" (see same pattern in _hs_pending_after_reader block).
+        local prev_action = plugin_ref.active_action
         Bottombar.setActiveAndRefreshFM(plugin_ref, "homescreen", tabs)
         if not plugin_ref._goalTapCallback then plugin_ref:addToMainMenu({}) end
+        -- plugin_ref.ui and loadTabConfig() resolved at tap time so FM
+        -- reinits or tab config changes while the HS is open are picked up.
         HS.show(
-            function(aid) plugin_ref:_navigate(aid, fm, tabs, false) end,
+            function(aid) plugin_ref:_navigate(aid, plugin_ref.ui, Config.loadTabConfig(), false) end,
             plugin_ref._goalTapCallback
         )
+        -- Correct _navbar_prev_action after injection (same reason as above).
+        local hs_inst = HS._instance
+        if hs_inst then hs_inst._navbar_prev_action = prev_action end
     end
 
     UIManager.close = function(um_self, widget, ...)
@@ -808,6 +768,11 @@ function M.patchUIManagerClose(plugin)
         if not (widget and widget.covers_fullscreen) then
             return orig_close(um_self, widget, ...)
         end
+
+        -- Detect if this is the FileManager itself closing.
+        -- FM has no name field at class level (name = "filemanager" belongs to its
+        -- FileChooser child), so widget.name is nil — we identify it by identity.
+        local widget_is_fm = (widget == plugin.ui)
 
         -- Restore the active tab when a SimpleUI-injected widget closes normally
         -- (not via intentional tab navigation).
@@ -839,7 +804,24 @@ function M.patchUIManagerClose(plugin)
                     UIManager:setDirty(fm, "ui")
                 end
             else
-                plugin:_restoreTabInFM(widget._navbar_tabs, widget._navbar_prev_action)
+                -- Pass nil for tabs: restoreTabInFM always loads fresh config.
+                plugin:_restoreTabInFM(nil, widget._navbar_prev_action)
+            end
+        end
+
+        -- When the FM itself is closing, the HomescreenWidget (if open) must be
+        -- closed too. FM:onClose → UIManager:close(fm) → returns; no quit() is
+        -- ever called explicitly. The event loop exits only when the stack empties.
+        -- Without this, the HS remains on the stack and the app never terminates.
+        if widget_is_fm then
+            local HS = package.loaded["homescreen"]
+            local hs_inst = HS and HS._instance
+            if hs_inst then
+                -- _navbar_closing_intentionally suppresses tab-restore and
+                -- re-open logic when our patched close() sees the HS widget.
+                hs_inst._navbar_closing_intentionally = true
+                orig_close(um_self, hs_inst)  -- bypass our wrapper, no re-entry
+                if HS._instance == hs_inst then HS._instance = nil end
             end
         end
 
@@ -848,12 +830,17 @@ function M.patchUIManagerClose(plugin)
         -- Re-open the homescreen after any fullscreen widget closes when
         -- "Start with Homescreen" is configured. Applies to both injected and
         -- native widgets (ReaderProgress, CalendarView, etc.).
-        -- Exclusions: the homescreen itself (would loop) and widgets being
-        -- closed by intentional tab navigation.
+        -- Exclusions:
+        --   • the homescreen itself (would loop)
+        --   • the FileManager — FM closing means the app is exiting
+        --   • widgets closed by intentional tab navigation
+        --   • UIManager already in quit (Restart / explicit quit paths)
         if isStartWithHS()
                 and widget.covers_fullscreen
                 and widget.name ~= "homescreen"
-                and not widget._navbar_closing_intentionally then
+                and not widget_is_fm
+                and not widget._navbar_closing_intentionally
+                and UIManager._exit_code == nil then
             local FM2 = package.loaded["apps/filemanager/filemanager"]
             local fm  = FM2 and FM2.instance
             local other_open = false
@@ -872,6 +859,7 @@ function M.patchUIManagerClose(plugin)
                     _hs_pending_after_reader = true
                 else
                     UIManager:scheduleIn(0, function()
+                        if UIManager._exit_code ~= nil then return end
                         local FM3 = package.loaded["apps/filemanager/filemanager"]
                         local fm2 = FM3 and FM3.instance
                         if fm2 then _doShowHS(fm2, plugin) end

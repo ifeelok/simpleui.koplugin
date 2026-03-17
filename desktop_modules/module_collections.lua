@@ -12,6 +12,8 @@ local GestureRange    = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local ImageWidget     = require("ui/widget/imagewidget")
 local InputContainer  = require("ui/widget/container/inputcontainer")
+local HorizontalSpan  = require("ui/widget/horizontalspan")
+local LineWidget      = require("ui/widget/linewidget")
 local OverlapGroup    = require("ui/widget/overlapgroup")
 local TextWidget      = require("ui/widget/textwidget")
 local VerticalGroup   = require("ui/widget/verticalgroup")
@@ -22,7 +24,8 @@ local lfs             = require("libs/libkoreader-lfs")
 local _               = require("gettext")
 local Config          = require("config")
 
-local UI      = require("ui")
+local UI           = require("ui")
+local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 local PAD     = UI.PAD
 local PAD2    = UI.PAD2
 local MOD_GAP = UI.MOD_GAP
@@ -38,11 +41,21 @@ local COLL_CELL_H  = CELL_H + Screen:scaleBySize(4) + LABEL_LINE_H
 local BADGE_SZ     = Screen:scaleBySize(18)
 local BADGE_MARGIN = Screen:scaleBySize(3)
 
+-- Stack effect: two vertical lines to the left of the main cover,
+-- mimicking the "pages" effect (same technique as the folder-cover patch).
+local EDGE_COLOR  = Blitbuffer.gray(0.55)  -- line colour
+local EDGE_THICK  = Screen:scaleBySize(3)  -- line width (horizontal extent)
+local EDGE_MARGIN = Screen:scaleBySize(1)  -- gap between lines (matches Size.line.medium from patch)
+local EDGE_H1     = 0.97                   -- inner line height as fraction of COLL_H
+local EDGE_H2     = 0.94                   -- outer line height as fraction of COLL_H
+-- Total extra width consumed to the left of the cover.
+local STACK_EXTRA  = 2 * EDGE_THICK + 2 * EDGE_MARGIN
+local STACK_CELL_W = COLL_W + STACK_EXTRA
+
 local LABEL_H = UI.LABEL_H
 
 local _CLR_COVER_BORDER = Blitbuffer.gray(0.45)  -- matches section label text colour
 local _CLR_COVER_BG     = Blitbuffer.gray(0.88)
-local _CLR_LABEL_TEXT   = Blitbuffer.gray(0.45)
 
 -- ---------------------------------------------------------------------------
 -- Settings keys
@@ -106,6 +119,7 @@ local function buildCoverCell(files, cover_override, coll_name, count)
     if front_fp and lfs.attributes(front_fp, "mode") ~= "file" then front_fp = nil end
     if not front_fp and #files > 0 then front_fp = files[1] end
 
+    -- Main cover (or placeholder).
     local cover
     if front_fp and lfs.attributes(front_fp, "mode") == "file" then
         local raw = getBookCover(front_fp, COLL_W, COLL_H)
@@ -133,13 +147,49 @@ local function buildCoverCell(files, cover_override, coll_name, count)
         }
     end
 
+    -- Stack effect: two vertical lines to the left of the cover, with
+    -- decreasing height outward — same technique as the folder-cover patch
+    -- (which uses horizontal lines above the cover for the same visual).
+    local h1 = math.floor(COLL_H * EDGE_H1)  -- inner line (taller, closer to cover)
+    local h2 = math.floor(COLL_H * EDGE_H2)  -- outer line (shorter, furthest left)
+    -- Centre each line vertically relative to COLL_H.
+    local y1 = math.floor((COLL_H - h1) / 2)
+    local y2 = math.floor((COLL_H - h2) / 2)
+
+    -- The two edge lines and the cover are laid out in a HorizontalGroup.
+    -- Each line is wrapped in an OverlapGroup so we can vertically centre it
+    -- inside a fixed COLL_H-tall slot without affecting the cover position.
+    local function edgeLine(h, y_off)
+        local line = LineWidget:new{
+            dimen      = Geom:new{ w = EDGE_THICK, h = h },
+            background = EDGE_COLOR,
+        }
+        line.overlap_offset = { 0, y_off }
+        return OverlapGroup:new{
+            dimen = Geom:new{ w = EDGE_THICK, h = COLL_H },
+            line,
+        }
+    end
+
+    local stack = HorizontalGroup:new{
+        align = "top",
+        edgeLine(h2, y2),                              -- outer (leftmost)
+        HorizontalSpan:new{ width = EDGE_MARGIN },
+        edgeLine(h1, y1),                              -- inner
+        HorizontalSpan:new{ width = EDGE_MARGIN },
+        cover,
+    }
+
     local accent = FrameContainer:new{
         bordersize = 0, padding = 0,
         background = Blitbuffer.COLOR_BLACK,
         dimen      = Geom:new{ w = COLL_W, h = ACCENT_H },
         VerticalSpan:new{ width = 0 },
     }
-    local base = VerticalGroup:new{ align = "left", cover, accent }
+
+    -- The accent bar sits under the cover only (not the lines), so we use
+    -- an OverlapGroup for the full cell to position it precisely.
+    local base = VerticalGroup:new{ align = "left", stack, accent }
 
     local badge_inner = CenterContainer:new{
         dimen = Geom:new{ w = BADGE_SZ, h = BADGE_SZ },
@@ -158,10 +208,14 @@ local function buildCoverCell(files, cover_override, coll_name, count)
         dimen      = Geom:new{ w = BADGE_SZ, h = BADGE_SZ },
         badge_inner,
     }
-    badge.overlap_offset = { BADGE_MARGIN, COLL_H - BADGE_SZ - BADGE_MARGIN }
+    -- Badge on the bottom-right of the main cover.
+    badge.overlap_offset = {
+        STACK_EXTRA + COLL_W - BADGE_SZ - BADGE_MARGIN,
+        COLL_H - BADGE_SZ - BADGE_MARGIN,
+    }
 
     return OverlapGroup:new{
-        dimen = Geom:new{ w = CELL_W, h = CELL_H },
+        dimen = Geom:new{ w = STACK_CELL_W, h = CELL_H },
         base, badge,
     }
 end
@@ -220,7 +274,7 @@ function M.build(w, ctx)
             require("ui/widget/textwidget"):new{
                 text    = _lc("No collections selected"),
                 face    = Font:getFace("cfont", Screen:scaleBySize(10)),
-                fgcolor = Blitbuffer.gray(0.55),
+                fgcolor = CLR_TEXT_SUB,
                 width   = w - PAD * 2,
             },
         }
@@ -237,7 +291,7 @@ function M.build(w, ctx)
         if rc._read then pcall(function() rc:_read() end) end
     end
 
-    local gap = math.floor((inner_w - 5 * CELL_W) / 4)
+    local gap = math.floor((inner_w - 5 * STACK_CELL_W) / 4)
     local row = HorizontalGroup:new{ align = "top" }
 
     for i = 1, cols do
@@ -249,8 +303,8 @@ function M.build(w, ctx)
         local label_w = TextWidget:new{
             text      = coll_name,
             face      = Font:getFace("cfont", Screen:scaleBySize(8)),
-            fgcolor   = _CLR_LABEL_TEXT,
-            width     = CELL_W,
+            fgcolor   = CLR_TEXT_SUB,
+            width     = STACK_CELL_W,
             alignment = "center",
         }
 
@@ -262,7 +316,7 @@ function M.build(w, ctx)
         }
 
         local tappable = InputContainer:new{
-            dimen      = Geom:new{ w = CELL_W, h = COLL_CELL_H },
+            dimen      = Geom:new{ w = STACK_CELL_W, h = COLL_CELL_H },
             [1]        = cell_vg,
             _coll_name = coll_name,
         }

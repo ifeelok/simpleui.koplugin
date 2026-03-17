@@ -12,7 +12,7 @@
 --
 -- CONTRATO DE CADA MÓDULO (module_*.lua)
 --
---   M.id             string   id único estável, e.g. "header", "collections"
+--   M.id             string   id único estável, e.g. "clock", "collections"
 --   M.name           string   nome legível para menus / Arrange
 --   M.label          string?  texto da section label acima do módulo (nil = sem label)
 --   M.enabled_key    string?  sufixo de settings: pfx .. enabled_key → bool
@@ -28,11 +28,17 @@
 -- em vez de um único id.
 --
 -- ADICIONAR UM MÓDULO: append de uma linha em MODULES. Nada mais.
+--
+-- NOTE: module_header is intentionally absent — it has been split into
+-- module_clock (Clock / Clock+Date / Custom Text) and module_quote
+-- (Quote of the Day). Installations that still use module_header directly
+-- are unaffected; it remains loadable as a standalone file.
 
 local logger = require("logger")
 
 local MODULES = {
-    { require_mod = "desktop_modules/module_header"        },
+    { require_mod = "desktop_modules/module_clock"         },
+    { require_mod = "desktop_modules/module_quote"         },
     { require_mod = "desktop_modules/module_currently"     },
     { require_mod = "desktop_modules/module_recent"        },
     { require_mod = "desktop_modules/module_collections"   },
@@ -49,13 +55,13 @@ local function _load()
     if _loaded then return end
     _loaded = {}
     _by_id  = {}
-    for _loop_, def in ipairs(MODULES) do
+    for _, def in ipairs(MODULES) do
         local ok, mod = pcall(require, def.require_mod)
         if not ok or not mod then
             logger.warn("simpleui: moduleregistry: failed to load '" .. def.require_mod .. "': " .. tostring(mod))
         elseif mod then
             local list = mod.sub_modules or { mod }
-            for _loop_, m in ipairs(list) do
+            for _, m in ipairs(list) do
                 if type(m.id) == "string" then
                     _loaded[#_loaded + 1] = m
                     _by_id[m.id]          = m
@@ -89,7 +95,7 @@ end
 
 function Registry.countEnabled(pfx)
     local n = 0
-    for _loop_, mod in ipairs(Registry.list()) do
+    for _, mod in ipairs(Registry.list()) do
         if Registry.isEnabled(mod, pfx) then n = n + 1 end
     end
     return n

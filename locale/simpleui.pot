@@ -585,3 +585,39 @@ msgstr ""
 
 msgid "visible"
 msgstr ""
+
+msgid "Arrange Buttons"
+msgstr ""
+
+msgid "Back"
+msgstr ""
+
+msgid "Button Size"
+msgstr ""
+
+msgid "Close"
+msgstr ""
+
+msgid "Custom Title Bar"
+msgstr ""
+
+msgid "Custom Title Bar will be %s after restart.\n\nRestart now?"
+msgstr ""
+
+msgid "Library Buttons"
+msgstr ""
+
+msgid "Menu"
+msgstr ""
+
+msgid "More Options"
+msgstr ""
+
+msgid "Sub-pages Buttons"
+msgstr ""
+
+msgid "Title"
+msgstr ""
+
+msgid "Title Bar"
+msgstr ""

@@ -20,12 +20,13 @@ local logger          = require("logger")
 local Config          = require("config")
 
 local UI      = require("ui")
+local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 local PAD     = UI.PAD
 local MOD_GAP = UI.MOD_GAP
 local LABEL_H = UI.LABEL_H
 
 local _CLR_TEXT_BLK  = Blitbuffer.COLOR_BLACK
-local _CLR_TEXT_SUB  = Blitbuffer.gray(0.45)
+
 local _CLR_CARD_BDR  = Blitbuffer.gray(0.72)
 
 local RS_CORNER_R = Screen:scaleBySize(12)
@@ -116,16 +117,21 @@ local function fetchAllStats(shared_conn)
         end
 
         r.total_secs  = tonumber(conn:rowexec("SELECT sum(duration) FROM page_stat;")) or 0
-        -- Use pre-aggregated total_read_pages from the book table instead of
-        -- recomputing via count(DISTINCT ps.page) + JOIN + GROUP BY.
-        -- total_read_pages is kept up-to-date by insertDB() in the statistics
-        -- plugin, and avoids the page-rescaling inaccuracies introduced by the
-        -- page_stat view when a book has been read across different layouts.
+        -- Compute finished-book ratio live from the page_stat VIEW rather than
+        -- using book.total_read_pages (a snapshot written at insertDB time).
+        -- The VIEW rescales page numbers to book.pages at query time, so the
+        -- ratio count(DISTINCT page)/pages is always consistent with the current
+        -- page count — even if the file was updated and re-indexed since the last
+        -- reading session.
         r.total_books = tonumber(conn:rowexec([[
-            SELECT count(*) FROM book
-            WHERE pages > 0
-              AND total_read_pages > 0
-              AND CAST(total_read_pages AS REAL) / pages >= 0.99]])) or 0
+            SELECT count(*) FROM (
+                SELECT b.id
+                FROM book b
+                JOIN page_stat ps ON ps.id_book = b.id
+                WHERE b.pages > 0
+                GROUP BY b.id
+                HAVING count(DISTINCT ps.page) * 1.0 / b.pages >= 0.90
+            )]])) or 0
 
         -- Streak query rewritten to avoid LIMIT inside a CTE — not supported by
         -- the SQLite version bundled in older KOReader builds.
@@ -199,7 +205,7 @@ local function buildStatCard(card_w, stat_id, stats)
                 TextWidget:new{
                     text    = lbl_str,
                     face    = Font:getFace("cfont", Screen:scaleBySize(8)),
-                    fgcolor = _CLR_TEXT_SUB,
+                    fgcolor = CLR_TEXT_SUB,
                 },
             },
         },
@@ -268,7 +274,7 @@ function M.build(w, ctx)
             TextWidget:new{
                 text    = _("No stats selected"),
                 face    = Font:getFace("smallinfofont", Device.screen:scaleBySize(11)),
-                fgcolor = Blitbuffer.gray(0.50),
+                fgcolor = CLR_TEXT_SUB,
                 width   = w - PAD * 2,
             },
         }

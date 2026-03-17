@@ -3,17 +3,22 @@
 -- (Top Bar, Bottom Bar, Quick Actions, Pagination Bar).
 -- Returns an installer: require("menu")(plugin) populates plugin.addToMainMenu.
 
-local UIManager       = require("ui/uimanager")
-local InfoMessage     = require("ui/widget/infomessage")
-local ConfirmBox      = require("ui/widget/confirmbox")
-local MultiInputDialog = require("ui/widget/multiinputdialog")
-local PathChooser     = require("ui/widget/pathchooser")
-local SortWidget      = require("ui/widget/sortwidget")
-local Device          = require("device")
-local Screen          = Device.screen
-local lfs             = require("libs/libkoreader-lfs")
-local logger          = require("logger")
-local _ = require("gettext")
+local UIManager = require("ui/uimanager")
+local Device    = require("device")
+local Screen    = Device.screen
+local lfs       = require("libs/libkoreader-lfs")
+local logger    = require("logger")
+local _         = require("gettext")
+
+-- Heavy UI widgets — lazy-loaded on first use so that require("menu") at boot
+-- does not pull them into memory before the user ever opens the settings menu.
+-- On low-memory devices these requires were the most likely point of silent
+-- failure that caused the menu entry to open nothing.
+local function InfoMessage()      return require("ui/widget/infomessage")      end
+local function ConfirmBox()       return require("ui/widget/confirmbox")        end
+local function MultiInputDialog() return require("ui/widget/multiinputdialog") end
+local function PathChooser()      return require("ui/widget/pathchooser")       end
+local function SortWidget()       return require("ui/widget/sortwidget")        end
 
 local Config    = require("config")
 local UI        = require("ui")
@@ -193,7 +198,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 for _i, tid in ipairs(tabs) do
                     sort_items[#sort_items + 1] = { text = getActionLabel(tid), orig_item = tid }
                 end
-                local sort_widget = SortWidget:new{
+                local sort_widget = SortWidget():new{
                     title             = _("Arrange tabs"),
                     item_table        = sort_items,
                     covers_fullscreen = true,
@@ -245,7 +250,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                     end
                     if active_pos then
                         if #tabs <= 2 then
-                            UIManager:show(InfoMessage:new{
+                            UIManager:show(InfoMessage():new{
                                 text = _("Minimum 2 tabs required. Select another tab first."), timeout = 2,
                             })
                             return
@@ -253,7 +258,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                         table.remove(tabs, active_pos)
                     else
                         if #tabs >= Config.MAX_TABS then
-                            UIManager:show(InfoMessage:new{
+                            UIManager:show(InfoMessage():new{
                                 text = string.format(_("Maximum %d tabs reached. Remove one first."), Config.MAX_TABS), timeout = 2,
                             })
                             return
@@ -288,7 +293,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                     local on = G_reader_settings:nilOrTrue("navbar_pagination_visible")
                     G_reader_settings:saveSetting("navbar_pagination_visible", not on)
                     local state_text = on and _("hidden") or _("visible")
-                    UIManager:show(ConfirmBox:new{
+                    UIManager:show(ConfirmBox():new{
                         text = string.format(_("Pagination bar will be %s after restart.\n\nRestart now?"), state_text),
                         ok_text = _("Restart"), cancel_text = _("Later"),
                         ok_callback = function()
@@ -317,7 +322,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                             end,
                             callback     = function()
                                 G_reader_settings:saveSetting("navbar_pagination_size", key)
-                                UIManager:show(ConfirmBox:new{
+                                UIManager:show(ConfirmBox():new{
                                     text = _("Pagination bar size will change after restart.\n\nRestart now?"),
                                     ok_text = _("Restart"), cancel_text = _("Later"),
                                     ok_callback = function()
@@ -411,7 +416,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                         sort_items[#sort_items + 1] = { text = TOPBAR_ITEM_LABEL(key), orig_item = key }
                     end
                 end
-                UIManager:show(SortWidget:new{
+                UIManager:show(SortWidget():new{
                     title             = _("Arrange Items"),
                     item_table        = sort_items,
                     covers_fullscreen = true,
@@ -423,7 +428,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                         end
                         if not sep_left_pos or not sep_right_pos or sep_left_pos > sep_right_pos
                                 or (sort_items[1] and sort_items[1].orig_item ~= SEP_LEFT) then
-                            UIManager:show(InfoMessage:new{
+                            UIManager:show(InfoMessage():new{
                                 text    = _("Invalid arrangement.\nKeep items between the Left and Right separators."),
                                 timeout = 3,
                             })
@@ -477,7 +482,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 callback     = function()
                     local on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
                     G_reader_settings:saveSetting("navbar_topbar_enabled", not on)
-                    UIManager:show(ConfirmBox:new{
+                    UIManager:show(ConfirmBox():new{
                         text = string.format(_("Top Bar will be %s after restart.\n\nRestart now?"), on and _("disabled") or _("enabled")),
                         ok_text = _("Restart"), cancel_text = _("Later"),
                         ok_callback = function()
@@ -529,7 +534,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 callback     = function()
                     local on = G_reader_settings:nilOrTrue("navbar_enabled")
                     G_reader_settings:saveSetting("navbar_enabled", not on)
-                    UIManager:show(ConfirmBox:new{
+                    UIManager:show(ConfirmBox():new{
                         text = string.format(_("Bottom Bar will be %s after restart.\n\nRestart now?"), on and _("disabled") or _("enabled")),
                         ok_text = _("Restart"), cancel_text = _("Later"),
                         ok_callback = function()
@@ -568,6 +573,229 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
 
     plugin._makeNavbarMenu = makeNavbarMenu
     plugin._makeTopbarMenu = makeTopbarMenu
+
+    -- -----------------------------------------------------------------------
+    -- Title Bar menu builder
+    -- -----------------------------------------------------------------------
+
+    -- Resolves the live FM + window stack and re-applies (or restores) all
+    -- titlebar state. Called by every toggle in this submenu.
+    local function _reapplyAllTitlebars()
+        local Titlebar = require("titlebar")
+        local FM = package.loaded["apps/filemanager/filemanager"]
+        local fm = FM and FM.instance
+        local stack = require("ui").getWindowStack()
+        Titlebar.reapplyAll(fm, stack)
+        if fm then UIManager:setDirty(fm[1], "ui") end
+    end
+
+    -- Builds a visibility toggle list for one context ("fm" or "inj").
+    local function makeTitleBarItemsForCtx(ctx)
+        local Titlebar = require("titlebar")
+        local items = {}
+        for _i, item in ipairs(Titlebar.ITEMS) do
+            if item.ctx == ctx then
+                local item_id    = item.id
+                local item_label = item.label
+                items[#items + 1] = {
+                    text_func = function()
+                        local state = Titlebar.isItemVisible(item_id) and _("On") or _("Off")
+                        return item_label() .. " — " .. state
+                    end,
+                    checked_func   = function() return Titlebar.isItemVisible(item_id) end,
+                    enabled_func   = function() return Titlebar.isEnabled() end,
+                    keep_menu_open = true,
+                    callback       = function()
+                        Titlebar.setItemVisible(item_id, not Titlebar.isItemVisible(item_id))
+                        _reapplyAllTitlebars()
+                    end,
+                }
+            end
+        end
+        return items
+    end
+
+    -- Builds an arrange-items menu for one context.
+    -- cfg_getter / cfg_saver — functions that load/save the side config.
+    -- ctx — "fm" or "inj", used to filter M.ITEMS.
+    local function makeTitleBarArrangeMenu(ctx, cfg_getter, cfg_saver)
+        local Titlebar   = require("titlebar")
+        local SEP_LEFT   = "__sep_left__"
+        local SEP_RIGHT  = "__sep_right__"
+
+        -- Build label lookup for this context.
+        local labels = {}
+        for _i, item in ipairs(Titlebar.ITEMS) do
+            if item.ctx == ctx and not item.no_side then
+                labels[item.id] = item.label
+            end
+        end
+
+        local cfg        = cfg_getter()
+        local sort_items = {}
+
+        sort_items[#sort_items + 1] = {
+            text = "── " .. _("Left") .. " ──", orig_item = SEP_LEFT, dim = true,
+        }
+        for _i, id in ipairs(cfg.order_left) do
+            if labels[id] then
+                sort_items[#sort_items + 1] = { text = labels[id](), orig_item = id }
+            end
+        end
+        sort_items[#sort_items + 1] = {
+            text = "── " .. _("Right") .. " ──", orig_item = SEP_RIGHT, dim = true,
+        }
+        for _i, id in ipairs(cfg.order_right) do
+            if labels[id] then
+                sort_items[#sort_items + 1] = { text = labels[id](), orig_item = id }
+            end
+        end
+
+        UIManager:show(SortWidget():new{
+            title             = _("Arrange Buttons"),
+            item_table        = sort_items,
+            covers_fullscreen = true,
+            callback          = function()
+                -- Validate: separators must be in correct relative order.
+                local sep_l, sep_r
+                for j, item in ipairs(sort_items) do
+                    if item.orig_item == SEP_LEFT  then sep_l = j end
+                    if item.orig_item == SEP_RIGHT then sep_r = j end
+                end
+                if not sep_l or not sep_r or sep_l > sep_r
+                        or (sort_items[1] and sort_items[1].orig_item ~= SEP_LEFT) then
+                    UIManager:show(InfoMessage():new{
+                        text    = _("Invalid arrangement.\nKeep items between the Left and Right separators."),
+                        timeout = 3,
+                    })
+                    return
+                end
+                local new_left, new_right = {}, {}
+                local current_side = nil
+                for _i, item in ipairs(sort_items) do
+                    if     item.orig_item == SEP_LEFT  then current_side = "left"
+                    elseif item.orig_item == SEP_RIGHT then current_side = "right"
+                    elseif current_side == "left"  then
+                        new_left[#new_left + 1]    = item.orig_item
+                        cfg.side[item.orig_item]   = "left"
+                    elseif current_side == "right" then
+                        new_right[#new_right + 1]  = item.orig_item
+                        cfg.side[item.orig_item]   = "right"
+                    end
+                end
+                -- Preserve hidden items at the end of each order list.
+                for _i, id in ipairs(cfg.order_left)  do
+                    if cfg.side[id] == "hidden" then new_left[#new_left + 1]   = id end
+                end
+                for _i, id in ipairs(cfg.order_right) do
+                    if cfg.side[id] == "hidden" then new_right[#new_right + 1] = id end
+                end
+                cfg.order_left  = new_left
+                cfg.order_right = new_right
+                cfg_saver(cfg)
+                _reapplyAllTitlebars()
+            end,
+        })
+    end
+
+    local function makeTitleBarFMMenu()
+        local Titlebar = require("titlebar")
+        local items = makeTitleBarItemsForCtx("fm")
+        items[#items].separator = true
+        items[#items + 1] = {
+            text           = _("Arrange Buttons"),
+            enabled_func   = function() return Titlebar.isEnabled() end,
+            keep_menu_open = true,
+            callback       = function()
+                makeTitleBarArrangeMenu("fm", Titlebar.getFMConfig, Titlebar.saveFMConfig)
+            end,
+        }
+        return items
+    end
+
+    local function makeTitleBarInjMenu()
+        local Titlebar = require("titlebar")
+        local items = makeTitleBarItemsForCtx("inj")
+        items[#items].separator = true
+        items[#items + 1] = {
+            text           = _("Arrange Buttons"),
+            enabled_func   = function() return Titlebar.isEnabled() end,
+            keep_menu_open = true,
+            callback       = function()
+                makeTitleBarArrangeMenu("inj", Titlebar.getInjConfig, Titlebar.saveInjConfig)
+            end,
+        }
+        return items
+    end
+
+    local function makeTitleBarMenu()
+        local function sizeItem(label, key)
+            return {
+                text         = label,
+                radio        = true,
+                keep_menu_open = true,
+                checked_func = function() return require("titlebar").getSizeKey() == key end,
+                callback     = function()
+                    require("titlebar").setSizeKey(key)
+                    _reapplyAllTitlebars()
+                end,
+            }
+        end
+        return {
+            {
+                text_func    = function()
+                    local on = require("titlebar").isEnabled()
+                    return _("Custom Title Bar") .. " — " .. (on and _("On") or _("Off"))
+                end,
+                checked_func = function() return require("titlebar").isEnabled() end,
+                separator    = true,
+                callback     = function()
+                    local Titlebar = require("titlebar")
+                    local on = Titlebar.isEnabled()
+                    Titlebar.setEnabled(not on)
+                    if on then
+                        G_reader_settings:flush()
+                        UIManager:show(ConfirmBox():new{
+                            text = string.format(
+                                _("Custom Title Bar will be %s after restart.\n\nRestart now?"),
+                                _("disabled")
+                            ),
+                            ok_text     = _("Restart"),
+                            cancel_text = _("Later"),
+                            ok_callback = function()
+                                local ok_exit, ExitCode = pcall(require, "exitcode")
+                                UIManager:quit((ok_exit and ExitCode and ExitCode.restart) or 85)
+                            end,
+                        })
+                    else
+                        _reapplyAllTitlebars()
+                    end
+                end,
+            },
+            {
+                text      = _("Button Size"),
+                enabled_func = function() return require("titlebar").isEnabled() end,
+                separator = true,
+                sub_item_table = {
+                    sizeItem(_("Compact"), "compact"),
+                    sizeItem(_("Default"), "default"),
+                    sizeItem(_("Large"),   "large"),
+                },
+            },
+            {
+                text         = _("Library Buttons"),
+                enabled_func = function() return require("titlebar").isEnabled() end,
+                sub_item_table_func = makeTitleBarFMMenu,
+            },
+            {
+                text         = _("Sub-pages Buttons"),
+                enabled_func = function() return require("titlebar").isEnabled() end,
+                sub_item_table_func = makeTitleBarInjMenu,
+            },
+        }
+    end
+
+    plugin._makeTitleBarMenu = makeTitleBarMenu
 
     -- -----------------------------------------------------------------------
     -- Quick Actions
@@ -759,7 +987,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 fields[#fields + 1] = { description = f.description, text = f.text or "", hint = f.hint }
             end
 
-            active_dialog = MultiInputDialog:new{
+            active_dialog = MultiInputDialog():new{
                 title  = dlg_title,
                 fields = fields,
                 buttons = {
@@ -772,7 +1000,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                             local inputs = active_dialog:getFields()
                             if spec.validate then
                                 local err = spec.validate(inputs)
-                                if err then UIManager:show(InfoMessage:new{ text = err, timeout = 3 }); return end
+                                if err then UIManager:show(InfoMessage():new{ text = err, timeout = 3 }); return end
                             end
                             UIManager:close(active_dialog); active_dialog = nil
                             spec.on_save(inputs)
@@ -784,7 +1012,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
         end
 
         local function openPathChooser()
-            UIManager:show(PathChooser:new{
+            UIManager:show(PathChooser():new{
                 select_directory = true, select_file = false, show_files = false,
                 path = start_path, covers_fullscreen = true,
                 height = Screen:getHeight() - TOTAL_H(),
@@ -839,7 +1067,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             local ButtonDialog   = require("ui/widget/buttondialog")
             local plugin_actions = _scanFMPlugins()
             if #plugin_actions == 0 then
-                UIManager:show(InfoMessage:new{ text = _("No plugins found."), timeout = 3 }); return
+                UIManager:show(InfoMessage():new{ text = _("No plugins found."), timeout = 3 }); return
             end
             local buttons = {}
             table.sort(plugin_actions, function(a, b) return a.title:lower() < b.title:lower() end)
@@ -867,7 +1095,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             local ButtonDialog = require("ui/widget/buttondialog")
             local actions = _scanDispatcherActions()
             if #actions == 0 then
-                UIManager:show(InfoMessage:new{ text = _("No system actions found."), timeout = 3 }); return
+                UIManager:show(InfoMessage():new{ text = _("No system actions found."), timeout = 3 }); return
             end
             local buttons = {}
             table.sort(actions, function(a, b) return a.title:lower() < b.title:lower() end)
@@ -915,7 +1143,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             enabled_func = function() return #getCustomQAList() < MAX_CUSTOM_QA end,
             callback     = function()
                 if #getCustomQAList() >= MAX_CUSTOM_QA then
-                    UIManager:show(InfoMessage:new{ text = string.format(_("Maximum %d quick actions reached. Delete one first."), MAX_CUSTOM_QA), timeout = 2 })
+                    UIManager:show(InfoMessage():new{ text = string.format(_("Maximum %d quick actions reached. Delete one first."), MAX_CUSTOM_QA), timeout = 2 })
                     return
                 end
                 showQuickActionDialog(nil, nil)
@@ -963,7 +1191,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                     sub[#sub + 1] = { text = _("Edit"),   callback = function() showQuickActionDialog(_id, nil) end }
                     sub[#sub + 1] = { text = _("Delete"), callback = function()
                         local c = getCustomQAConfig(_id)
-                        UIManager:show(ConfirmBox:new{
+                        UIManager:show(ConfirmBox():new{
                             text        = string.format(_("Delete quick action \"%s\"?"), c.label),
                             ok_text     = _("Delete"), cancel_text = _("Cancel"),
                             ok_callback = function()
@@ -1086,7 +1314,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             for _i, v in ipairs(items) do if v == id then found = true else new_items[#new_items+1] = v end end
             if not found then
                 if #items >= MAX_QA_ITEMS then
-                    UIManager:show(InfoMessage:new{ text = string.format(_("Maximum %d actions per module reached. Remove one first."), MAX_QA_ITEMS), timeout = 2 })
+                    UIManager:show(InfoMessage():new{ text = string.format(_("Maximum %d actions per module reached. Remove one first."), MAX_QA_ITEMS), timeout = 2 })
                     return
                 end
                 new_items[#new_items+1] = id
@@ -1101,11 +1329,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
               end },
             { text = _("Arrange"), keep_menu_open = true, separator = true, callback = function()
                   local qa_ids = getItems()
-                  if #qa_ids < 2 then UIManager:show(InfoMessage:new{ text = _("Add at least 2 actions to arrange."), timeout = 2 }); return end
+                  if #qa_ids < 2 then UIManager:show(InfoMessage():new{ text = _("Add at least 2 actions to arrange."), timeout = 2 }); return end
                   local pool_labels = {}; for _i, a in ipairs(getQAPool()) do pool_labels[a.id] = a.label end
                   local sort_items = {}
                   for _i, id in ipairs(qa_ids) do sort_items[#sort_items+1] = { text = pool_labels[id] or id, orig_item = id } end
-                  UIManager:show(SortWidget:new{ title = string.format(_("Arrange %s"), slot_label), covers_fullscreen = true, item_table = sort_items,
+                  UIManager:show(SortWidget():new{ title = string.format(_("Arrange %s"), slot_label), covers_fullscreen = true, item_table = sort_items,
                       callback = function()
                           local new_order = {}; for _i, item in ipairs(sort_items) do new_order[#new_order+1] = item.orig_item end
                           G_reader_settings:saveSetting(items_key, new_order); ctx.refresh()
@@ -1143,7 +1371,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
         end
 
         local function maxMsg()
-            UIManager:show(InfoMessage:new{
+            UIManager:show(InfoMessage():new{
                 text = string.format(_("Maximum %d modules active. Disable one first."), MAX_MOD), timeout = 2 })
         end
 
@@ -1153,8 +1381,8 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             pfx_qa        = ctx.pfx_qa,
             refresh       = ctx.refresh,
             UIManager     = UIManager,
-            InfoMessage   = InfoMessage,
-            SortWidget    = SortWidget,
+            InfoMessage   = InfoMessage(),
+            SortWidget    = SortWidget(),
             _             = _,
             MAX_LABEL_LEN = MAX_LABEL_LEN,
             makeQAMenu    = makeQAMenu,
@@ -1273,11 +1501,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                     end
                                 end
                                 if #sort_items < 2 then
-                                    UIManager:show(InfoMessage:new{
+                                    UIManager:show(InfoMessage():new{
                                         text = _("Enable at least 2 modules to arrange."), timeout = 2 })
                                     return
                                 end
-                                UIManager:show(SortWidget:new{
+                                UIManager:show(SortWidget():new{
                                     title = _("Arrange Modules"), item_table = sort_items,
                                     covers_fullscreen = true,
                                     callback = function()
@@ -1308,7 +1536,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                 local on = isUnlimited()
                                 G_reader_settings:saveSetting(NO_LIMIT_KEY, not on)
                                 if not on then
-                                    UIManager:show(InfoMessage:new{
+                                    UIManager:show(InfoMessage():new{
                                         text = _("Module limit disabled. Enabling too many modules may slow down the homescreen significantly and modules may be clipped at the bottom of the page."),
                                         timeout = 4,
                                     })
@@ -1402,7 +1630,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                     -- setting unsaved, which would cause a white-screen boot loop
                     -- the next time KOReader starts with the plugin installed.
                     G_reader_settings:flush()
-                    UIManager:show(ConfirmBox:new{
+                    UIManager:show(ConfirmBox():new{
                         text        = string.format(_("Simple UI will be %s after restart.\n\nRestart now?"), on and _("disabled") or _("enabled")),
                         ok_text     = _("Restart"), cancel_text = _("Later"),
                         ok_callback = function()
@@ -1417,10 +1645,9 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 text               = _("Settings"),
                 sub_item_table_func = function()
                     return {
-                        { text = _("Top Bar"),        sub_item_table_func = makeTopbarMenu },
-                        { text = _("Home Screen"),    sub_item_table_func = makeHomescreenMenu },
-                        { text = _("Pagination Bar"), sub_item_table_func = makePaginationBarMenu },
-                        { text = _("Bottom Bar"),     sub_item_table_func = makeNavbarMenu },
+                        { text = _("Top Bar"),     sub_item_table_func = makeTopbarMenu },
+                        { text = _("Home Screen"), sub_item_table_func = makeHomescreenMenu },
+                        { text = _("Bottom Bar"),  sub_item_table_func = makeNavbarMenu },
                         {
                             text_func = function()
                                 local n   = #getCustomQAList()
@@ -1432,6 +1659,13 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                 return string.format(_("Quick Actions  (%d/%d — %d left)"), n, MAX_CUSTOM_QA, rem)
                             end,
                             sub_item_table_func = makeQuickActionsMenu,
+                        },
+                        {
+                            text = _("More Options"),
+                            sub_item_table = {
+                                { text = _("Pagination Bar"), sub_item_table_func = makePaginationBarMenu },
+                                { text = _("Title Bar"),      sub_item_table_func = makeTitleBarMenu      },
+                            },
                         },
                     }
                 end,
