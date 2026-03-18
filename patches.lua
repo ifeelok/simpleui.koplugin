@@ -988,6 +988,75 @@ end
 -- installAll / teardownAll
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- Resume hook
+-- Opens the Homescreen after the device wakes from suspend, but only when:
+--   • "Start with Homescreen" is active (isStartWithHS())
+--   • the Homescreen tab exists in the tab config
+--   • no reader session is active (RUI.instance is nil)
+--   • the Homescreen is not already on screen (HS._instance is nil)
+--   • UIManager is not in quit/exit state
+--
+-- Called from SimpleUIPlugin:onResume() in main.lua.
+-- Reuses the already-installed _doShowHS closure from patchUIManagerClose
+-- by looking up the live FM instance the same way that function does.
+-- scheduleIn(0) defers until the event loop has finished processing the
+-- Resume event chain (screensaver dismiss, topbar refresh, etc.) so that
+-- UIManager:show(HS) lands on a fully-settled stack.
+-- ---------------------------------------------------------------------------
+function M.showHSAfterResume(plugin)
+    -- Guard 1: setting must be "Start with Homescreen".
+    if not isStartWithHS() then return end
+
+    -- Guard 2: reader must not be active.
+    local RUI = package.loaded["apps/reader/readerui"]
+    if RUI and RUI.instance then return end
+
+    -- Guard 3: homescreen tab must be in the tab config.
+    local tabs = Config.loadTabConfig()
+    if not tabInTabs("homescreen", tabs) then return end
+
+    -- Guard 4: HS must not already be open.
+    local HS = package.loaded["homescreen"]
+    if HS and HS._instance then return end
+
+    -- Guard 5: UIManager must not be shutting down.
+    if UIManager._exit_code ~= nil then return end
+
+    UIManager:scheduleIn(0, function()
+        -- Re-check guards at execution time — state may have changed while
+        -- the 0-second schedule was queued (e.g. user opened a book).
+        if UIManager._exit_code ~= nil then return end
+        local RUI2 = package.loaded["apps/reader/readerui"]
+        if RUI2 and RUI2.instance then return end
+        local HS2 = package.loaded["homescreen"]
+        if HS2 and HS2._instance then return end
+
+        local FM = package.loaded["apps/filemanager/filemanager"]
+        local fm = FM and FM.instance
+        if not fm then return end
+
+        -- Lazily load Homescreen if not yet in package.loaded.
+        if not HS2 then
+            local ok, m = pcall(require, "homescreen")
+            HS2 = ok and m
+        end
+        if not HS2 then return end
+
+        local t = Config.loadTabConfig()
+        local prev_action = plugin.active_action
+        Bottombar.setActiveAndRefreshFM(plugin, "homescreen", t)
+        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
+        HS2.show(
+            function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end,
+            plugin._goalTapCallback
+        )
+        -- Preserve the previous tab so back-button from HS returns correctly.
+        local hs_inst = HS2._instance
+        if hs_inst then hs_inst._navbar_prev_action = prev_action end
+    end)
+end
+
 function M.installAll(plugin)
     M.patchFileManagerClass(plugin)
     M.patchStartWithMenu()

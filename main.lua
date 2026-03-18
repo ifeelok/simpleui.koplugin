@@ -109,13 +109,18 @@ function SimpleUIPlugin:onResume()
     if G_reader_settings:nilOrTrue("navbar_topbar_enabled") then
         Topbar.scheduleRefresh(self, 0)
     end
-    -- Only invalidate caches if we are returning from an active reading session.
     local RUI = package.loaded["apps/reader/readerui"]
-    if RUI and not RUI.instance then
+    local reader_active = RUI and RUI.instance
+    -- Outside the reader: invalidate stat caches and restore the Homescreen.
+    if not reader_active then
         local ok_rg, RG = pcall(require, "readinggoals")
         if ok_rg and RG and RG.Stats then RG.Stats.invalidateCache() end
         local ok_rs, RS = pcall(require, "desktop_modules/module_reading_stats")
         if ok_rs and RS and RS.invalidateCache then RS.invalidateCache() end
+        -- Re-open the Homescreen on wakeup when "Start with Homescreen" is set.
+        if G_reader_settings:nilOrTrue("simpleui_enabled") then
+            Patches.showHSAfterResume(self)
+        end
     end
 end
 
